@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Annotated
+from typing import Annotated, AsyncGenerator
 
 from a2a.types import Message, Role
 from a2a.utils.message import get_message_text
@@ -67,6 +67,16 @@ def _normalize_tool_call_args(args: str) -> str:
     return args
 
 
+def _normalize_chunk_tool_calls(chunk) -> None:
+    """Normalize tool-call args on a ChatModelOutput chunk in place."""
+    for msg in getattr(chunk, "output", []) or []:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for part in getattr(msg, "content", []) or []:
+            if isinstance(part, MessageToolCallContent):
+                part.args = _normalize_tool_call_args(part.args)
+
+
 class CompatOpenAIChatModel(OpenAIChatModel):
     """
     OpenAIChatModel subclass that normalizes tool-call arguments emitted by
@@ -75,17 +85,16 @@ class CompatOpenAIChatModel(OpenAIChatModel):
     BeeAI's tool validation expects a dict; some providers (DashScope/Qwen)
     return a list like [{"name": "think", "arguments": {...}}], which fails
     pydantic validation. This override unwraps the list before validation.
+
+    Normalization must happen after streaming chunks are merged into complete
+    tool-call args, so we override _create_stream to patch the merged result
+    right before it is yielded and validated.
     """
 
-    def _transform_output(self, chunk):  # type: ignore[override]
-        result = super()._transform_output(chunk)
-        for msg in getattr(result, "output", []) or []:
-            if not isinstance(msg, AssistantMessage):
-                continue
-            for part in getattr(msg, "content", []) or []:
-                if isinstance(part, MessageToolCallContent):
-                    part.args = _normalize_tool_call_args(part.args)
-        return result
+    async def _create_stream(self, input, context) -> AsyncGenerator:  # type: ignore[override]
+        async for chunk in super()._create_stream(input, context):
+            _normalize_chunk_tool_calls(chunk)
+            yield chunk
 
 
 server = Server()
