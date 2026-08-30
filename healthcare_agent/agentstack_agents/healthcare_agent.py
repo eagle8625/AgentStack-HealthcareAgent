@@ -18,16 +18,74 @@ from agentstack_sdk.a2a.extensions import (
     TrajectoryExtensionSpec,
 )
 from beeai_framework.adapters.openai import OpenAIChatModel
+from beeai_framework.backend.message import AssistantMessage, MessageToolCallContent
 from beeai_framework.agents.requirement import RequirementAgent
 from beeai_framework.agents.requirement.requirements.conditional import ConditionalRequirement
 from beeai_framework.agents.types import AgentExecutionConfig
 from beeai_framework.backend import ChatModelParameters
-from beeai_framework.backend.message import AssistantMessage, UserMessage
+from beeai_framework.backend.message import UserMessage
 from beeai_framework.memory import UnconstrainedMemory
 from beeai_framework.tools.think import ThinkTool
 from beeai_framework.tools.handoff import HandoffTool
 from beeai_framework.adapters.agentstack.agents import AgentStackAgent
 from beeai_framework.adapters.agentstack.agents.types import AgentStackAgentStatus
+
+
+def _normalize_tool_call_args(args: str) -> str:
+    """
+    Normalize tool call arguments that some OpenAI-compatible providers
+    (e.g. DashScope/Qwen) wrap as a list of tool-call objects.
+
+    Expected (standard):  '{"thought": "..."}'
+    Malformed (wrapped):  '[{"name": "think", "arguments": {"thought": "..."}}]'
+
+    Unwraps the list and returns the inner arguments as a JSON string.
+    """
+    if not args:
+        return args
+    try:
+        parsed = json.loads(args)
+    except json.JSONDecodeError:
+        return args
+
+    if not isinstance(parsed, list) or not parsed:
+        return args
+
+    first = parsed[0]
+    if not isinstance(first, dict):
+        return args
+
+    # Case 1: {"name": "...", "arguments": {...}}  -> use inner arguments
+    inner = first.get("arguments")
+    if isinstance(inner, dict):
+        return json.dumps(inner, ensure_ascii=False)
+
+    # Case 2: the list itself is the arguments (rare) -> use first dict element
+    if isinstance(first, dict) and not any(k in first for k in ("name", "tool_name")):
+        return json.dumps(first, ensure_ascii=False)
+
+    return args
+
+
+class CompatOpenAIChatModel(OpenAIChatModel):
+    """
+    OpenAIChatModel subclass that normalizes tool-call arguments emitted by
+    OpenAI-compatible providers which wrap tool calls in a list envelope.
+
+    BeeAI's tool validation expects a dict; some providers (DashScope/Qwen)
+    return a list like [{"name": "think", "arguments": {...}}], which fails
+    pydantic validation. This override unwraps the list before validation.
+    """
+
+    def _transform_output(self, chunk):  # type: ignore[override]
+        result = super()._transform_output(chunk)
+        for msg in getattr(result, "output", []) or []:
+            if not isinstance(msg, AssistantMessage):
+                continue
+            for part in getattr(msg, "content", []) or []:
+                if isinstance(part, MessageToolCallContent):
+                    part.args = _normalize_tool_call_args(part.args)
+        return result
 
 
 server = Server()
@@ -127,7 +185,7 @@ async def healthcare_concierge(
         return
 
 
-    llm_client = OpenAIChatModel(
+    llm_client = CompatOpenAIChatModel(
         model_id=llm_config.api_model,
         base_url=llm_config.api_base,
         api_key=llm_config.api_key,
