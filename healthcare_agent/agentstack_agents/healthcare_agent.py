@@ -161,7 +161,7 @@ async def healthcare_concierge(
     trajectory: Annotated[TrajectoryExtensionServer, TrajectoryExtensionSpec()],
     llm: Annotated[
         LLMServiceExtensionServer,
-        LLMServiceExtensionSpec.single_demand(suggested=("gemini:gemini-2.5-flash-lite",)),
+        LLMServiceExtensionSpec.single_demand(suggested=("other:deepseek-v4-pro-0813",)),
     ],
 ):
     """
